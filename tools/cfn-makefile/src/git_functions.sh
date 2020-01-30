@@ -1,0 +1,383 @@
+#!/bin/bash
+
+set -o pipefail
+
+INCLUDE_FILE='.git_include'
+
+function error(){
+    >&2 echo "ERROR: ${1}"
+    # >&2 echo "TRACE: ${FUNCNAME[*]}" | awk '{ for(i=NF; i>1; i--) printf("%s:",$i); print $1;}'
+    return_code="${2}"
+    [[ ! ${return_code} =~ ^[0-9]+$ ]] && return_code=1
+    return ${return_code}
+}
+
+function exit_on_error(){
+    "$@"
+    local ret=$?
+    if [ ! $ret -eq 0 ];then
+        >&2 echo "ERROR: Command [ $@ ] returned $ret"
+        exit $ret
+    fi  
+}
+
+function git_destination(){
+    # Return clean repository name -- filter out .git and any parameters
+    # input: {GIT_REPOSITORY} {WORKDIR}
+    local var=$( 
+        basename "${1}" \
+        |sed 's/?.*//g;
+              s/\.git$//g;
+              s/[^a-zA-Z0-9_-]//g'
+    )
+    # TODO: check if still needed
+    # if repository is a URL, lowercase
+    # urlcheck = sed -n '/^\(http\|ssh\)[s]\?:\/\/\|.*?.*/p'))
+    # convert the url part to lowercase to prevent input/ typo mistakes
+    # |awk '{print tolower($0)}' 
+    [ ! -z "${var}" ] \
+    && printf "${var}" \
+    || printf $(basename "${2}")
+    return $?
+}
+
+function git_set_default_user(){
+    # set default git user/ email if none exist
+    # required to allow automated commits to build repositories
+    [ -z "$(git config user.name)" ] \
+        && git config user.name `whoami`
+    [ -z "$(git config user.email)" ] \
+         && git config user.email `whoami`@localhost
+    # assume success, if fail: git will stop-fail next
+    return 0
+}
+
+function git_auto_commit(){
+    # commit changes automatically
+    git_set_default_user
+    git add . \
+    &&  (
+            git diff-index --quiet HEAD 2>/dev/null \
+            || git commit -am "__auto_commit__:$(date +%s)"
+        )
+    return $?
+}
+
+function git_parameter(){
+    # extract parameter value from URL
+    local uri_str="${1}"
+    local parameter_name="${2}"
+    # pre-set default value
+    local parameter_value="${3}"
+
+    read parameter_pair <<< $(
+        sed -n 's/.*\('${parameter_name}'=[A-Za-z0-9-]*\).*/\1/p' \
+        <<< "${uri_str##*\?}"
+    ) || return $?
+
+    [ ! -z "${parameter_pair}" ] &&
+        local parameter_value=${parameter_pair#*=}
+
+    printf "${parameter_value}"
+    return $?
+}
+
+function git_namestring(){
+    # Return a string formatted as RepoName--Branch--Commit
+    local repository="${1}"
+    local workdir="${2}"
+
+    local rname="$(git_destination "${repository}" "${workdir}")" || return $?
+    local branch="$(git_parameter "${repository}" branch master)" || return $?
+    local commit="$(git_parameter "${repository}" commit latest)" || return $?
+    if [ "${commit}" = 'latest' ];then
+        local heads=$(git ls-remote "${repository%\?*}" refs/heads/"${branch}")
+        local commit=$(printf "${heads}" |awk '{print $1}')
+        if [ -z "${commit}" ];then
+            >&2 echo "ERROR: cant find branch \"${branch}\" on \"${repository%\?*}\""
+            return 1
+        fi
+    fi
+    printf "${rname}--${branch}--${commit}"
+    return $?
+}
+
+
+function pull_from_git(){
+    # pull repository and checkout to specified branch tag/commit
+    local origin="${1}"
+    local workdir="${2}"
+
+    local branch=$(git_parameter "${origin}" branch master) || return $?
+    local target=.build/"$(git_namestring "${origin}" "${workdir}")" || return $?
+
+    # if repository exists local: fetch, else: clone
+    if [ -e "${target}"/.git ];then
+        (
+            cd "${target}" \
+            && git fetch origin \
+            && git reset --hard origin/master
+        ) || return $?
+    else
+        git clone -b "${branch}" "${origin%\?*}" "${target}" \
+        || return $?
+    fi
+
+    # if _commit: checkout commit position, else: checkout latest
+    local commit=$(git_parameter "${origin}" commit) || return $?
+    if [ ! -z "${commit}" ] && [ "${commit}" != 'latest' ];then
+        (
+            cd "${target}" \
+            && git checkout -B ${branch} ${commit} \
+            || return $?
+        )
+    else
+        (
+            cd "${target}" \
+                && git checkout -B ${branch} \
+                && git pull \
+                || return $?
+        )
+    fi
+    return $?
+}
+
+function git_update_remote_config(){
+    local remote="${1}"
+    local repository="${2}"
+    local exist=$(
+        git remote |sed -n 's/\(^'${remote}'$\)/\1/p'
+    ) || return $?
+    # remove existing version if exist
+    if [ ! -z "${exist}" ];then
+        git remote rm "${remote}" || return $?
+    fi
+    git remote add "${remote}" "${repository}"
+    return $?
+}
+
+function git_delete_branch_if_exist(){
+    local branchname="${1}"
+    if git show-ref --verify --quiet refs/heads/"${branchname}";then
+        git branch -D "${branchname}" || return $?
+    fi
+    return 0
+}
+
+function git_set_ignore(){
+    [ -d .build ] || mkdir .build || return 1
+    cat << IGNORE_FILE_BUILD >.build/.gitignore 
+# ignore everything under build
+# .build/* should only contain generated data
+# this file is auto-generated by Makefile
+*
+IGNORE_FILE_BUILD
+    return $?
+}
+
+function init_build_repo(){
+    # create a brand new repo
+    local directory="${1}"
+    [ ! -d "${directory}"/.git ] \
+    || error "${directory}/.git ALREADY EXISTS" $? \
+    || return $?
+
+    mkdir -p "${directory}" \
+    || error "FAILED TO CREATE: ${directory}" $? \
+    || return $?
+
+    cd "${directory}" \
+    && git init -q \
+    || return $?
+
+    if [ ! -z "${2}" ] && [ "$2" = 'commit' ];then
+        git_set_ignore \
+        && git add -f .build/.gitignore >/dev/null \
+        && git commit -q -am '__auto__Makefile:init__' \
+        && git add . >/dev/null \
+        && git commit -q -am '__auto__Makefile:xxxx__' \
+        || return $?
+    fi
+    printf "${directory}"
+    return $?
+}
+    
+    #&& git add . \
+
+function git_extract_path(){
+    # extract path-contents from one repository to another
+    # pathmap='${origin_path}:${target_path}'
+    local pathmap="${1}"
+    local origin_repo="${2}"
+    local target_repo="${3}"
+
+    # split pathmap in origin- and new path 
+    local origin_path="${pathmap%:*}"
+    local target_path="${pathmap##*:}"
+
+    if [ -z "${origin_path}" ] || [ -z "${target_path}" ];then
+        error "FAILED READING PATHMAP \"${pathmap}\""
+        return 1
+    fi
+
+    local workdir="$(pwd)"
+    pull_from_git "${origin_repo}" "${workdir}" || return $?
+
+    # ensure source repository is in original state
+    local source_name=$(git_namestring "${origin_repo}" "${workdir}")
+    local source_repo="${workdir}"/.build/"${source_name}"
+    local source_branch=$(git_parameter "${source_repo}" branch master) || return $?
+
+    # filter origin_path to a new (path-)branch in source repository
+    (
+        # ensure we are in the source_repo
+        cd "${source_repo}" || return $?
+
+        # verify commit. Var is also re-used later as unique var used to put files in
+        branchid="$(
+            git log -n1 --pretty=format:%h -- "${origin_path}"
+        )__${target_path//\//-}"
+        [ -z "${branchid}" ] && continue
+
+        # Create a clean orphan branch
+        git_delete_branch_if_exist "${branchid}" \
+        && git checkout --orphan "${branchid}" \
+        && git rm -qfr --cached --ignore-unmatch . \
+        && git clean -qfd \
+        || return $?
+
+        # Merge ${origin_path} into orphan branch
+        git checkout "${source_branch}" -- "${origin_path}"/ \
+        || return $?
+
+        # ensure "${target_path} is the only remaining directory
+        # complicated directory dance to make collission chance neglible
+        tmpdir=."${branchid}"
+        mv "${origin_path}" "${tmpdir}" \
+        && git rm -qfr --cached --ignore-unmatch . \
+        && git clean -qf * \
+        && mkdir -p "$(dirname "${target_path}")" \
+        && mv "${tmpdir}" "${target_path}" \
+        && git_auto_commit || return $?
+    ) || return $?
+
+    # merge (path-)branch to build_repo
+    (
+        # merge branch 
+        cd "${target_repo}" \
+        && git_update_remote_config "${source_name}" "${source_repo}" \
+        && git pull --depth 1 "${source_name}" "${branchid}" \
+             --allow-unrelated-histories --no-edit -X theirs \
+        || return $?
+
+        git remote rm "${source_name}"
+    ) || return $?
+    return 0
+}
+
+
+function git_merge_include(){
+    # process .git_include file and merge referenced repository-contents
+    path="${1}"
+
+    if [ ! -z "${path}" ];then
+        cd ./"${path}" || error "CANT CHANGE TO PATH \"${path}\"" $? || return $?
+    fi
+
+    # set GIT user if none is set. This is needed to enable commit functionality
+    # in non-developer environments (e.g. deployment pipelines)
+    git_set_default_user
+
+    if [ ! -d .git ];then
+        init_build_repo '.' 'commit' \
+        || error 'FAILED TO INITIALISE GIT REPO' $? || return $?
+    fi
+
+    # retrieve section_names ([...]) from file
+    local section_names=$(
+        sed 's/^\[//g;s/\]//g' <<< \
+            $(sed -n 's/\(^\[[-A-Za-z0-9_.:/@?=&]*\]\)$/\1/p' "${INCLUDE_FILE}")
+    ) || error 'FAILED READING SECTION NAMES' $? || return $?
+
+    # escape newlines (idea by: https://stackoverflow.com/questions/1251999)
+    local contents=$(
+        sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g' "${INCLUDE_FILE}"
+    ) || error 'FAILED READING CONTENTS' $? || return $?
+
+    # get clean working repository to initially store the pulls
+    local build_repo="$(pwd)"/"$(
+        init_build_repo ".build/temp-git-$(($(date +%s%N)/1000000))"
+    )" || error 'FAILED CREATING BUILD_REPO' $? || return $?
+
+    # iterate over sections
+    for name in ${section_names};do
+    (
+        # extract section block required for this iteration
+        section=$(
+            sed 's/.*\(\['${name}'\][^[]*\).*/\1/;
+                 s/\\n/\n/g' <<< "${contents}"
+        ) || error "FAILED TO EXTRACT SECTION \"${name}\"" $? || return $?
+
+        # extract repository=value
+        read repository_kv <<< $(
+            sed -n 's/\(^repository=[-A-Za-z0-9:/.@?=&]*\)$/\1/p' <<< "${section}"
+        )
+        if [ ! $? -eq 0 ] || [ -z "${repository_kv#*=}" ];then
+            error "MISSING repository=[-A-Za-z0-9:/.@?=&]* IN \"${name}\""
+            return 1
+        fi
+
+        # extract pathlist=value
+          # value: comma separated list of '${source_path}:${new_path}' pairs
+          # chars [-A-Za-z0-9_/.@=+] are safe to use for path-names
+        read pathlist_kv <<< $(
+            sed -n 's/\(^pathlist=[-A-Za-z0-9:_/.@=+,]*\)$/\1/p' <<< "${section}"
+        )
+        if [ ! $? -eq 0 ] || [ -z "${pathlist_kv#*=}" ];then
+            error "MISSING pathlist=[-A-Za-z0-9:_/.@=+,]* IN \"${name}\""
+            return 1
+        fi
+
+        # for each path in list, extract the contents to build_repo
+        # merge strategy is "-X theirs" -- i.e. each next path supersedes the former
+        pathlist_str="${pathlist_kv#*=}"
+        for pathmap in ${pathlist_str//,/ };do
+            git_extract_path \
+                "${pathmap}" "${repository_kv#*=}" "${build_repo}" \
+            || error "FAILED TO PROCESS \"${pathmap}\"" $? || return $?
+        done
+    ) || return $?
+    done
+
+    # Merge the contents of build_repo to working repository (/branch)
+    # merge strate is "-X ours" -- i.e. working repository supersedes build_repo
+    git_update_remote_config "final-merge" "${build_repo}" || return $?
+    git pull --depth 1 "final-merge" master --allow-unrelated-histories \
+        --no-edit -X ours || return $?
+
+    # fetch only
+    # git fetch --depth 1 --no-tags --no-recurse-submodules final-merge master:my-new-branch 
+    git remote rm final-merge || return $?
+
+    # if .git is an auto-created sibling-git (i.e. temporary): clean it up
+    # determine by:
+    # - first_commit signature
+    # - is_git-query one directory up in the hierarchy (redundant safety-check)
+    if [ -d .git ];then
+        first_commit="$(
+            git log --reverse --pretty=oneline 2>/dev/null \
+            |sed -n 's/.*\(__auto__Makefile:init__\)$/\1/p'
+        )" || return $?
+
+        [ ! -z "${first_commit}" ] \
+        && [ "${first_commit}" = '__auto__Makefile:init__' ] \
+        && (
+            cd ../ \
+            && git rev-parse --is-inside-work-tree >/dev/null 2>&1;
+            return $?
+        ) && rm -rf .git
+    fi
+    # cleanup all remaining build artifacts
+    [ -d .build ] && rm -rf .build
+    return 0
+}

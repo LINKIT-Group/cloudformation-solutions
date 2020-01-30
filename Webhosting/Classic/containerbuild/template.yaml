@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  SourceBucket:
+    Type: String
+  SourceObjectKey:
+    Type: String
+  RepositoryList:
+    Type: CommaDelimitedList
+  DockerHubUsername:
+    Type: String
+    NoEcho: true
+    Default: ""
+  DockerHubPassword:
+    Type: String
+    NoEcho: true
+    Default: ""
+Resources:
+  Repositories:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: repositories.yaml
+      Parameters:
+        RepositoryList: !Join [',', !Ref RepositoryList]
+  Secrets:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        DockerHubUsername: !Ref DockerHubUsername
+        DockerHubPassword: !Ref DockerHubPassword
+      TemplateURL: secrets.yaml
+  ArtifactBucket:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: bucket.yaml
+  EcrCodePipeline:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        SourceBucket: !Ref SourceBucket
+        SourceObjectKey: !Ref SourceObjectKey
+        OutputBucket: !GetAtt ArtifactBucket.Outputs.Name
+        RepositoryList: !Join [',', !Ref RepositoryList]
+        KMSKeyArn: !GetAtt Secrets.Outputs.KMSKeyArn
+        SecretsManagerSecretArn: !GetAtt Secrets.Outputs.DockerHubSecretArn
+      TemplateURL: codepipeline.yaml

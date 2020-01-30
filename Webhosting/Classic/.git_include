@@ -1,0 +1,3 @@
+[network]
+repository=https://github.com/LINKIT-Group/cloudformation-samples.git?branch=master&commit=latest
+pathlist=Network/Default:network,Containers/ContainerBuild:containerbuild

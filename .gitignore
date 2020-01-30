@@ -1,0 +1,9 @@
+.env
+cdk.out
+__pycache__
+*.swp
+dist
+build
+.build
+.git
+parameters.ini
