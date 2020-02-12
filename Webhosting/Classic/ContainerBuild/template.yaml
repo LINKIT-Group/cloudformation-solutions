@@ -1,0 +1,69 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+
+  SourceBucket:
+    Type: String
+
+  SourceObjectKey:
+    Type: String
+
+  RepositoryPathList:
+    Type: CommaDelimitedList
+
+  DockerHubUsername:
+    Type: String
+    NoEcho: true
+    Default: ''
+
+  EnvironmentName:
+    Type: String
+
+  DockerHubPassword:
+    Type: String
+    NoEcho: true
+    Default: ''
+
+  WaiterLambda:
+    Type: String
+
+Resources:
+
+  Repositories:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: repositories.yaml
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        RepositoryPathList: !Join [',', !Ref RepositoryPathList]
+
+  Secrets:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        DockerHubUsername: !Ref DockerHubUsername
+        DockerHubPassword: !Ref DockerHubPassword
+      TemplateURL: secrets.yaml
+
+  ArtifactBucket:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: bucket.yaml
+
+  CodePipeline:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        SourceBucket: !Ref SourceBucket
+        SourceObjectKey: !Ref SourceObjectKey
+        OutputBucket: !GetAtt ArtifactBucket.Outputs.Name
+        RepositoryPathList: !Join [',', !Ref RepositoryPathList]
+        EnvironmentName: !Ref EnvironmentName
+        KMSKeyArn: !GetAtt Secrets.Outputs.KMSKeyArn
+        SecretsManagerSecretArn: !GetAtt Secrets.Outputs.DockerHubSecretArn
+        ECSTaskExecutionRole: !GetAtt Repositories.Outputs.EcsTaskExecutionRole
+        WaiterLambda: !Ref WaiterLambda
+      TemplateURL: codepipeline.yaml
+#
+#Outputs:
+#  RepositoryList:
+#    Value: !GetAtt Repositories.Outputs.RepositoryList

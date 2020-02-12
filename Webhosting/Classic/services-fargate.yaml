@@ -1,0 +1,32 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  EnvironmentName:
+    Type: String
+  VpcId:
+    Type: String
+  PrivateSubnets:
+    Type: String
+
+Mappings:
+  Services:
+    Fn::Transform:
+      Name: AWS::Include
+      Parameters:
+        Location: services-map.yaml
+
+Resources:
+  Frontend:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: aws-fargate/service-fargate-public-lb.yml
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VpcId: !Ref VpcId
+        PrivateSubnets: !Ref PrivateSubnets
+        ServiceName: Frontend
+        TaskDefParam:
+          !Join
+          - '/'
+          - - ''
+            - !Ref EnvironmentName
+            - !FindInMap ['Services', 'Frontend', 'Path']

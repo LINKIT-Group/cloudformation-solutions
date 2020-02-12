@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Private endpoint resources required in the context of ECR/Fargate
+Parameters:
+  VpcId:
+    Type: String
+  PrivateSubnets:
+    Type: String
+  PrivateRouteTables:
+    Type: String
+Resources:
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: "EndpointSecurityGroup"
+      GroupDescription: "Security group for traffic flowing to Endpoints"
+      VpcId: !Ref VpcId
+  EndpointSecurityGroupAllowSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow traffic within security group
+      GroupId: !Ref EndpointSecurityGroup
+      SourceSecurityGroupId: !Ref EndpointSecurityGroup
+      IpProtocol: '-1'
+  EcrEndpointApi:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: '*'
+          Principal: '*'
+          Resource: '*'
+      SecurityGroupIds:
+      - !Ref EndpointSecurityGroup
+      SubnetIds: !Split [",", !Ref PrivateSubnets]
+  EcrEndpointDkr:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      VpcId: !Ref VpcId
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: '*'
+          Principal: '*'
+          Resource: '*'
+      SecurityGroupIds:
+      - !Ref EndpointSecurityGroup
+      SubnetIds: !Split [",", !Ref PrivateSubnets]
+  CloudWatchEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      VpcId: !Ref VpcId
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: '*'
+          Principal: '*'
+          Resource: '*'
+      SecurityGroupIds:
+      - !Ref EndpointSecurityGroup
+      SubnetIds: !Split [",", !Ref PrivateSubnets]
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      VpcId: !Ref VpcId
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: '*'
+          Principal: '*'
+          Resource: '*'
+      RouteTableIds: !Split [",", !Ref PrivateRouteTables]
+Outputs:
+  EndpointSecurityGroup:
+    Description: Security Group governing Traffic to Endpoints
+    Value: !Ref EndpointSecurityGroup

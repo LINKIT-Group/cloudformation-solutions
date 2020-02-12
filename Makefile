@@ -8,8 +8,8 @@
 
 SHELL := /bin/bash
 NAME := CloudFormation Makefile
-VERSION := 0.92-1580422768262
-DATE := 2020-01-30T22:19:28.262397+00:00
+VERSION := 0.92-1580468200300
+DATE := 2020-01-31T10:56:40.299912+00:00
 
 # profile=
 _AWS_PROFILE = \
@@ -363,6 +363,7 @@ export LICENSE
 
 define cfn-env
 	source .build/cfn_functions.sh; \
+	export AWS_PROFILE=$(_AWS_PROFILE); \
 	exit_on_error
 endef
 
@@ -396,7 +397,7 @@ function configstack_output(){
     # retrieve output value by passing name of OutputKey as input argument
     # input: {STACKNAME} {KEY}
     aws cloudformation describe-stacks \
-        --profile $$(_AWS_PROFILE) \
+        --profile $${AWS_PROFILE} \
         --stack-name "$${1}" \
         --query 'Stacks[0].Outputs[?OutputKey==`'$${2}'`].OutputValue' \
         --output text 2>/dev/null || return $$?
@@ -406,7 +407,7 @@ function stack_status(){
     # retrieve status of stack by passing unique stack-name as input argument
     # input: {STACKNAME}
     aws cloudformation list-stacks \
-        --profile $$(_AWS_PROFILE) \
+        --profile $${AWS_PROFILE} \
         --no-paginate \
         --query 'StackSummaries[?StackName==`'$${1}'`].[StackStatus][0]' \
         --output text
@@ -449,7 +450,7 @@ function delete_stack(){
     [ "$${stack_status}" == "DELETE_COMPLETE" ] \
     || [ "$${stack_status}" == "None" ] && return 0
 
-    aws cloudformation delete-stack --profile $$(_AWS_PROFILE) \
+    aws cloudformation delete-stack --profile $${AWS_PROFILE} \
         --stack-name "$${1}" \
         --role-arn "$${2}"
     stack_delete_waiter "$${1}"
@@ -459,7 +460,7 @@ function delete_stack(){
 function delete_stack_configuration(){
     # delete stack_configuration and wait -- no input arguments
     # input: {CONFIGSTACK}
-    aws cloudformation delete-stack --profile $$(_AWS_PROFILE) \
+    aws cloudformation delete-stack --profile $${AWS_PROFILE} \
         --stack-name "$${1}"
     stack_delete_waiter "$${1}"
     return $$?

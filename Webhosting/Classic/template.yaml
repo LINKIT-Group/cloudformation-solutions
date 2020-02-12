@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  S3Bucket:
+    Type: String
+
+  S3BucketPrefix:
+    Type: String
+
+  DockerHubUsername:
+    Type: String
+    NoEcho: true
+    Default: ''
+
+  DockerHubPassword:
+    Type: String
+    NoEcho: true
+    Default: ''
+
+Mappings:
+  Services:
+    Fn::Transform:
+      Name: AWS::Include
+      Parameters:
+        Location: services-map.yaml
+Resources:
+  Network:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: Network/vpc.yaml
+
+  WaiterLambda:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: WaiterLambda/template.yaml
+
+  PrivateEndpoints:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: endpoints.yaml
+      Parameters:
+        VpcId: !GetAtt Network.Outputs.VpcId
+        PrivateSubnets: !GetAtt Network.Outputs.PrivateSubnets
+        PrivateRouteTables: !GetAtt Network.Outputs.PrivateRouteTables
+
+  ContainerBuild:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        SourceBucket: !Ref S3Bucket
+        SourceObjectKey: !Sub ${S3BucketPrefix}/docker-codebuild.zip
+        EnvironmentName: !Sub '${AWS::StackName}'
+        DockerHubUsername: !Ref DockerHubUsername
+        DockerHubPassword: !Ref DockerHubPassword
+        RepositoryPathList:
+          !Join
+          - ','
+          - - !FindInMap ['Services', 'Frontend', 'Path']
+            - !FindInMap ['Services', 'Backend', 'Path']
+        WaiterLambda: !GetAtt WaiterLambda.Outputs.Arn
+      TemplateURL: ContainerBuild/template.yaml
+  
+  FargateCluster:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: aws-fargate/fargate-cluster.yml
+      Parameters:
+        EnvironmentName: !Sub '${AWS::StackName}'
+        VpcId: !GetAtt Network.Outputs.VpcId
+
+  IngressLBPublic:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: aws-fargate/ingress-lb.yml
+      Parameters:
+        EnvironmentName: !Sub '${AWS::StackName}'
+        VpcId: !GetAtt Network.Outputs.VpcId
+        PublicSubnetOne: !Select [0, !Split [',', !GetAtt Network.Outputs.PublicSubnets]]
+        PublicSubnetTwo: !Select [1, !Split [',', !GetAtt Network.Outputs.PublicSubnets]]
+    DependsOn: FargateCluster
+
+  IngressServicediscoveryPrivate:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: aws-fargate/ingress-service-discovery.yml
+      Parameters:
+        EnvironmentName: !Sub '${AWS::StackName}'
+        VpcId: !GetAtt Network.Outputs.VpcId
+        Domain: !Sub ${AWS::StackName}.test
+    DependsOn: FargateCluster
+
+  AllowFarGateToEndpoints:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow Containers to Access Endpoints
+      GroupId: !GetAtt PrivateEndpoints.Outputs.EndpointSecurityGroup
+      SourceSecurityGroupId: !GetAtt FargateCluster.Outputs.ContainerSecurityGroup
+      IpProtocol: '-1'
+
+  Services:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+    - FargateCluster
+    - IngressServicediscoveryPrivate
+    - IngressLBPublic
+    - AllowFarGateToEndpoints
+    - ContainerBuild
+    Properties:
+      TemplateURL: services-fargate.yaml
+      Parameters:
+        EnvironmentName: !Sub '${AWS::StackName}'
+        VpcId: !GetAtt Network.Outputs.VpcId
+        PrivateSubnets: !GetAtt Network.Outputs.PrivateSubnets

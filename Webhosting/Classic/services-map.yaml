@@ -1,0 +1,9 @@
+Frontend:
+  Path: Webservers/Nginx
+  ContainerPort: 80
+  DesiredCount: 2
+  DeregistrationDelay: 0
+  UrlPaths: '/client/*,/*'
+Backend:
+  Path: Databases/Mysql
+  ContainerPort: 3306

@@ -1,0 +1,37 @@
+{
+    "family": "'"$ECS_TASK_FAMILY"'",
+    "cpu": "512",
+    "memory": "1024",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "executionRoleArn": "'"$ECS_TASK_EXECUTION_ROLE"'",
+    "containerDefinitions": [
+        {
+            "name": "Frontend",
+            "image": "'"$AWS_ACCOUNT_ID"'.dkr.ecr.'"$AWS_REGION"'.amazonaws.com/'"$ECR_REPO_NAME"':latest",
+            "cpu": 512,
+            "memory": 1024,
+            "environment": [
+                {
+                    "name": "Frist",
+                    "value": "Foo"
+                }
+            ],
+            "portMappings": [
+                {
+                    "containerPort": 80
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "Ecs/'"$ENVIRONMENT_NAME"'/'"$IMAGE_REPO_NAME"'",
+                    "awslogs-region": "'"$AWS_REGION"'",
+                    "awslogs-stream-prefix": "Frontend"
+                }
+            }
+        }
+    ]
+}

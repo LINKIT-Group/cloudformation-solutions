@@ -1,0 +1,390 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: CodePipeline stack to create ECR images
+Parameters:
+  SourceBucket:
+    Type: String
+
+  SourceObjectKey:
+    Type: String
+
+  KMSKeyArn:
+    Type: String
+
+  SecretsManagerSecretArn:
+    Type: String
+
+  OutputBucket:
+    Type: String
+
+  RepositoryPathList:
+    Type: String
+
+  EnvironmentName:
+    Type: String
+
+  ECSTaskExecutionRole:
+    Type: String
+
+  WaiterLambda:
+    Type: String
+
+Conditions:
+  SecretsManagerSet: !Not [!Equals [!Ref SecretsManagerSecretArn, '']]
+
+Resources:
+  CodePipelineJobResultRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: WriteCloudwatchLogs
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+            - 'arn:aws:logs:*:*:*'
+      - PolicyName: JobResult
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - codepipeline:PutJobSuccessResult
+            - codepipeline:PutJobFailureResult
+            Resource: '*'
+
+  CodePipelineLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.7
+      Handler: index.handler
+      Role: !GetAtt CodePipelineJobResultRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          codepipeline_client = boto3.client('codepipeline')
+
+          def handler(event, context):
+              """The Lambda function handler"""
+              job_id = None
+              try:
+                  logger.info('invoked codepipeline lambda')
+                  job_id = event['CodePipeline.job']['id']
+                  codepipeline_client.put_job_success_result(jobId=job_id)
+              except Exception as e:
+                  logger.info(str(e))
+                  # traceback.print_exc()
+                  if job_id:
+                      codepipeline_client.put_job_failure_result(
+                        jobId=job_id,
+                        failureDetails={'message': str(e), 'type': 'JobFailed'}
+                      )
+                  else:
+                      logger.info('ERROR: missing CodePipeline job_id')
+
+  BuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+      Policies:
+      - PolicyName: CodePipeLinePrivileges
+        PolicyDocument:
+          Statement:
+          - Action: logs:*
+            Effect: Allow
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*
+          - Action: codepipeline:GetPipelineState
+            Effect: Allow
+            Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:*
+          - Action:
+            - kms:Encrypt
+            - kms:Decrypt
+            - kms:GenerateDataKey
+            Resource: !Ref KMSKeyArn
+            Effect: Allow
+          - Action:
+            - s3:GetObject
+            Effect: Allow
+            Resource:
+            - !Sub 'arn:aws:s3:::${SourceBucket}/${SourceObjectKey}'
+          - Action:
+            - s3:GetObject
+            - s3:GetObjectAcl
+            - s3:DeleteObject
+            - s3:PutObject
+            - s3:PutObjectAcl
+            - s3:AbortMultipartUpload
+            Effect: Allow
+            Resource:
+            - !Sub 'arn:aws:s3:::${OutputBucket}'
+            - !Sub 'arn:aws:s3:::${OutputBucket}/*'
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            - ecr:GetAuthorizationToken
+            Resource: '*'
+            Effect: Allow
+          - Action:
+            - ecr:GetDownloadUrlForLayer
+            - ecr:BatchGetImage
+            - ecr:BatchCheckLayerAvailability
+            - ecr:PutImage
+            - ecr:InitiateLayerUpload
+            - ecr:UploadLayerPart
+            - ecr:CompleteLayerUpload
+            Effect: Allow
+            Resource:
+            - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*
+          - Action:
+            - ecs:RegisterTaskDefinition
+            Resource: '*'
+            Effect: Allow
+          - Action:
+            - ssm:PutParameter
+            Resource:
+              - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*'
+            Effect: Allow
+          - Action:
+            - iam:PassRole
+            Resource: !Ref ECSTaskExecutionRole
+            Effect: Allow
+
+  SecretsPolicy:
+    Type: AWS::IAM::Policy
+    Condition: SecretsManagerSet
+    Properties:
+      PolicyName: GetSecretValue
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: secretsmanager:GetSecretValue
+          Resource: !Ref SecretsManagerSecretArn
+      Roles:
+      - !Ref BuilderRole
+
+  Builder:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Description: Builder to copy-mod-paste Docker images to ECR
+      EncryptionKey: !Ref KMSKeyArn
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:2.0
+        Type: LINUX_CONTAINER
+        PrivilegedMode: True
+        EnvironmentVariables:
+        - Name: SECRETS_MANAGER_SECRET
+          Value: !Ref SecretsManagerSecretArn
+        - Name: ECR_REPOSITORY
+          Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+      ServiceRole: !Ref BuilderRole
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 60
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AdministratorAccess
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref OutputBucket
+        EncryptionKey:
+          Id: !Ref KMSKeyArn
+          Type: KMS
+        Type: S3
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      DisableInboundStageTransitions:
+      - Reason: 'Disabled initially to prevent run before Pipeline is finalised'
+        StageName: Invoke
+      Stages:
+      - Name: Source
+        Actions:
+        - ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Provider: S3
+            Version: '1'
+          Name: S3Source
+          Configuration:
+            S3Bucket: !Ref SourceBucket
+            PollForSourceChanges: True
+            S3ObjectKey: !Ref SourceObjectKey
+          OutputArtifacts:
+          - Name: S3Source
+      - Name: Invoke
+        Actions:
+        - Name: LambdaInvocation
+          ActionTypeId:
+            Category: Invoke
+            Owner: AWS
+            Provider: Lambda 
+            Version: '1'
+          Configuration:
+            FunctionName: !Ref CodePipelineLambda
+            # UserParameters: !GetAtt StoreWaitHandle.ParameterName
+            # https://docs.aws.amazon.com/codepipeline/latest/userguide/action-reference-Lambda.html
+
+  PipelineUpdateRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: WriteCloudwatchLogs
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+      - PolicyName: CreatePipeline
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - codepipeline:UpdatePipeline
+            - codepipeline:TagResource
+            - codepipeline:GetPipeline
+            - codepipeline:ListPipelines
+            - codepipeline:ListTagsForResource
+            - codepipeline:UntagResource
+            - codepipeline:EnableStageTransition
+            - codepipeline:StartPipelineExecution
+            Resource:
+            - !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}'
+            - !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}/*'
+      - PolicyName: Passrole
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - iam:PassRole
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${CodePipelineRole}'
+
+  PipelineUpdateLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.8
+      Handler: pipeline_update.handler
+      Role: !GetAtt PipelineUpdateRole.Arn
+      Timeout: 60
+      CodeUri: src
+
+  PipelineUpdate:
+    Type: Custom::PipelineUpdate
+    Properties:
+      ServiceToken: !GetAtt PipelineUpdateLambda.Arn
+      Target: !Ref CodePipeline
+      EnableInboundStageTransitions:
+      - Invoke
+      ExecutePipeline: true
+      Stages:
+      - StageOrder: 1
+        MapConfig:
+        - SourceAction: DockerBuild
+          NameList: !Ref RepositoryPathList
+          EnvironmentVariables:
+            IMAGE_REPO_NAME: !Ref RepositoryPathList
+        StageDeclaration:
+          name: Build
+          Actions:
+          - ActionTypeId:
+              Category: Build
+              Owner: AWS
+              Provider: CodeBuild
+              Version: '1'
+            Name: DockerBuild
+            Configuration:
+              ProjectName: !Ref Builder
+              EnvironmentVariables:
+              - Name: ENVIRONMENT_NAME
+                Value: !Ref EnvironmentName
+                Type: 'PLAINTEXT'
+              - Name: ECS_TASK_EXECUTION_ROLE
+                Value: !Ref ECSTaskExecutionRole
+                Type: 'PLAINTEXT'
+            InputArtifacts:
+            - Name: S3Source
+            OutputArtifacts:
+            - Name: DockerBuild
+
+  CheckPipelineLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.8
+      Handler: check_pipeline.handler
+      Policies:
+      - Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action:
+          # - codepipeline:GetPipeline
+          - codepipeline:ListPipelineExecutions
+          Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+      CodeUri: src
+
+  # if PipelineUpdate is of type Create:
+  # - SUCCESS when Invoke.LatestExecution == Succeeded (see Probe-Lambda for details)
+  # - FAIL on Timeout (~20 minutes)
+  Waiter:
+    Type: Custom::Waiter
+    Properties:
+      ServiceToken: !Ref WaiterLambda
+      PauseTimeInMinutes: 1
+      TimeoutInMinutes: 20
+      SuccessCount: !GetAtt PipelineUpdate.RequestTypeCreate
+      Probes:
+      - Provider: Lambda
+        Properties:
+          ServiceToken: !GetAtt CheckPipelineLambda.Arn
+          PipelineName: !GetAtt PipelineUpdate.PipelineName

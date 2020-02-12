@@ -1,0 +1,4 @@
+S3Bucket={{ S3Bucket }}
+S3BucketPrefix={{ S3BucketPrefix }}
+DockerHubUsername={{ DockerHubUsername }}
+DockerHubPassword={{ DockerHubPassword }}

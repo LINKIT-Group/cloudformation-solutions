@@ -1,0 +1,182 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: WaiterLambda
+Parameters:
+  BucketArn:
+    Type: String
+    Default: ''
+  BucketPrefix:
+    Type: String
+    Default: ''
+
+Conditions:
+  BucketArnNotSet: !Equals [!Ref BucketArn, '']
+  BucketPrefixNotSet: !Equals [!Ref BucketPrefix, '']
+
+Resources:
+
+  WaiterBucket:
+    Type: AWS::S3::Bucket
+    Condition: BucketArnNotSet
+    Properties:
+      VersioningConfiguration:
+        Status: Suspended
+      LifecycleConfiguration:
+        Rules:
+        - ExpirationInDays: 1
+          Status: Enabled
+        - NoncurrentVersionExpirationInDays: 1
+          Status: Disabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+
+  EmptyWaiterBucketLambda:
+    Type: AWS::Serverless::Function
+    Condition: BucketArnNotSet
+    Properties:
+      Runtime: python3.8
+      Handler: empty_bucket.handler
+      Timeout: 59
+      Policies:
+      - Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+            - s3:List*
+            - s3:DeleteObject
+            - s3:DeleteObjectVersion
+            Resource:
+            - !Sub ${WaiterBucket.Arn}
+            - !Sub ${WaiterBucket.Arn}/*
+      CodeUri: src
+
+  EmptyBucket:
+    Type: Custom::EmptyBucket
+    Condition: BucketArnNotSet
+    Properties:
+      ServiceToken: !GetAtt EmptyWaiterBucketLambda.Arn
+      BucketName: !Ref WaiterBucket
+
+  WaiterLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: WriteLogs
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+      - PolicyName: CreateEventRule
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - events:PutRule
+            - events:DescribeRule
+            - events:PutTargets
+            - events:DeleteRule
+            - events:ListTargetsByRule
+            - events:RemoveTargets
+            Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/*'
+      - PolicyName: BucketPrefixRW
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            - s3:List*
+            - s3:GetObject
+            - s3:DeleteObject
+            Resource:
+            - !If
+              - BucketArnNotSet
+              - !If
+                - BucketPrefixNotSet
+                - !Sub ${WaiterBucket.Arn}/${AWS::StackName}
+                - !Sub ${WaiterBucket.Arn}/${BucketPrefix}
+              - !If
+                - BucketPrefixNotSet
+                - !Sub ${BucketArn}/${AWS::StackName}
+                - !Sub ${BucketArn}/${BucketPrefix}
+            - !If
+              - BucketArnNotSet
+              - !If
+                - BucketPrefixNotSet
+                - !Sub ${WaiterBucket.Arn}/${AWS::StackName}/*
+                - !Sub ${WaiterBucket.Arn}/${BucketPrefix}/*
+              - !If
+                - BucketPrefixNotSet
+                - !Sub ${BucketArn}/${AWS::StackName}/*
+                - !Sub ${BucketArn}/${BucketPrefix}/*
+          - Effect: Allow
+            Action:
+            - s3:GetBucketLocation
+            Resource: !If [BucketArnNotSet, !GetAtt WaiterBucket.Arn, !Ref BucketArn]
+      - PolicyName: InvokeLambdaFunctions
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:InvokeFunction
+            Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
+
+  WaiterLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.8
+      Handler: eventrule_waiter.handler
+      Role: !GetAtt WaiterLambdaRole.Arn
+      Timeout: 59
+      CodeUri: src
+      Environment:
+        Variables:
+          S3BucketArn: !If [BucketArnNotSet, !GetAtt WaiterBucket.Arn, !Ref BucketArn]
+          S3BucketPrefix: !If [BucketPrefixNotSet, !Ref AWS::StackName, !Ref BucketPrefix]
+          Test: Value7
+
+  WaiterLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt WaiterLambda.Arn
+      Principal: events.amazonaws.com
+
+
+# USAGE EXAMPLE 
+#  CustomWait:
+#    Type: Custom::CustomWait
+#    Properties:
+#      ServiceToken: !Ref WaiterLambda
+#      S3Bucket: !Ref Bucket
+#      S3Prefix: !Ref CustomWaitLambda 
+#      #S3Bucket: !Ref ScratchBucket
+#      #S3Prefix: !Ref ScratchBucketPrefix
+#      PauseTimeInMinutes: 1
+#      TimeoutInMinutes: 20
+#      SuccessCount: 1
+#      Probes:
+#      - Provider: Lambda
+#        Properties:
+#          ServiceToken: !GetAtt InvokeExampleLambda.Arn
+
+Outputs:
+  Arn:
+    Value: !GetAtt WaiterLambda.Arn

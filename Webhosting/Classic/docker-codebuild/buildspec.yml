@@ -1,0 +1,36 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      docker: 18
+  pre_build:
+    commands:
+    - echo Logging in to Amazon ECR...
+    - $(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION)
+    - '[ ! -z "$SECRETS_MANAGER_SECRET" ] && secret=$(aws secretsmanager get-secret-value --secret-id $SECRETS_MANAGER_SECRET --query SecretString --output text) || true'
+    - '[ ! -z "$secret" ] && echo "${secret}" |jq .password -r |docker login --username $(echo "${secret}" |jq .username -r) --password-stdin || true'
+  build:
+    commands:
+    - echo Build started on `date`
+    - echo Building the Docker image...
+    - 'ECR_REPO_NAME=$(printf $ENVIRONMENT_NAME | tr "[:upper:]" "[:lower:]")/$(printf $IMAGE_REPO_NAME | tr "[:upper:]" "[:lower:]")'
+    - echo $ECR_REPO_NAME
+    - docker build -t $ECR_REPO_NAME:latest $IMAGE_REPO_NAME
+    - docker tag $ECR_REPO_NAME:latest $ECR_REPOSITORY/$ECR_REPO_NAME:latest
+  post_build:
+    commands:
+    - echo Build completed on `date`
+    - echo Pushing the Docker image...
+    - docker push $ECR_REPOSITORY/$ECR_REPO_NAME:latest
+    - ECS_TASK_FAMILY=$ENVIRONMENT_NAME-$(sed 's/\//-/g' <<< $IMAGE_REPO_NAME)
+    - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    - eval taskdef=\'$(cat $IMAGE_REPO_NAME/taskdefinition.json)\'
+    - printf '%s\n' "$taskdef" >taskdefinition.json
+    - 'aws ecs register-task-definition --cli-input-json file://taskdefinition.json >response.json'
+    - taskDefinitionArn=$(jq -r .taskDefinition.taskDefinitionArn response.json)
+    - echo $taskDefinitionArn
+    - aws ssm put-parameter --name /$ENVIRONMENT_NAME/$IMAGE_REPO_NAME --value $taskDefinitionArn --type String --overwrite
+artifacts:
+  files:
+  - taskdefinition.json
+  - response.json
